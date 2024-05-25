@@ -1,0 +1,171 @@
+#!/usr/bin/env python
+
+import argparse
+import asyncio
+import struct
+
+class AnthemDiscoveryProxy(asyncio.Protocol):
+  MAGIC = 'PARC'
+  PROXY_MAGIC = 'Anthem Proxy'
+
+  def __init__(self, future, host = None, port = None, device = None, model = None, serial = None):
+    print('__init__')
+    self.future = future # XXX
+    self.udp = None
+    self.tcp = None
+    self.proxied_host = host
+    self.proxied_port = port
+    self.proxied_version = 1
+    self.proxied_device = device
+    self.proxied_model = model
+    self.proxied_serial = serial
+
+  def connection_made(self, transport):
+    print('connection_made')
+    if type(transport) is asyncio.selector_events._SelectorDatagramTransport: # XXX
+      self.udp = transport
+    else:
+      self.tcp = transport
+
+  def connection_lost(self, e):
+    print('connection_lost')
+    #self.future.set_result(True)
+
+  def from_bytes(self, b):
+    return b.decode().rstrip('\0')
+
+  # 00:00:06.728684 IP 192.168.150.39.14999 > 255.255.255.255.14999: UDP, length 64
+  #        0x0000:  4500 005c 722c 0000 4011 b195 c0a8 9627  E..\r,..@......'
+  #        0x0010:  ffff ffff 3a97 3a97 0048 8fda 5041 5243  ....:.:..H..PARC
+  #        0x0020:  0000 0100 0000 0001 0000 0000 0000 0000  ................
+  #        0x0030:  0000 0000 0000 0000 0000 0000 0000 0000  ................
+  #        0x0040:  0000 0000 0000 0000 0000 0000 0000 0000  ................
+  #        0x0050:  0000 0000 0000 0000 0000 0000            ............
+  async def query(self):
+    addr = ('255.255.255.255', 14999)
+    return self.send_discovery_packet(addr, announce = True, device = self.PROXY_MAGIC)
+
+  def send_discovery_packet(self, addr = None, announce = False, version = 0, port = None, device = None, model = None, serial = None):
+    if device is None:
+      device = ''
+    if model is None:
+      model = ''
+    if serial is None:
+      serial = ''
+    buffer = struct.pack('!4s2xbbLL16s16s16s', self.MAGIC.encode(), 1 if announce else 0, 0, version, port or 14999, device.encode(), model.encode(), serial.encode())
+    print(f'Sending packet: {buffer} to {addr}')
+    return self.udp.sendto(buffer, addr)
+
+  def on_discovery_request(self, addr):
+    host, port = addr
+    print(f'Discovery request from {host}')
+    if not self.proxied_device or not self.proxied_host:
+      print("Can't respond yet")
+      return
+    return self.send_discovery_packet(addr, version = self.proxied_version, device = self.proxied_device, model = self.proxied_model, serial = self.proxied_serial)
+
+  def on_discovery_reply(self, host, port, version, device, model, serial):
+    if self.proxied_host and host != self.proxied_host:
+      print(f'Ignoring reply from {host} not {self.proxied_host}')
+      return
+    if self.proxied_port and port != self.proxied_port:
+      print(f'Ignoring reply from port {port} not {self.proxied_port}')
+      return
+    self.proxied_host = host
+    self.proxied_port = port
+    print(f'Device: {device.decode()}; model: {model.decode()}; serial: {serial.decode()}')
+    proxied_device = self.from_bytes(device)
+    if len(proxied_device) < 10:
+      proxied_device += ' proxy'
+    elif len(proxied_device) < 16:
+      proxied_device += '*'
+    self.proxied_version = version
+    self.proxied_device = proxied_device
+    self.proxied_model = self.from_bytes(model)
+    self.proxied_serial = self.from_bytes(serial)
+
+  def datagram_received(self, data, addr):
+    host, port = addr
+    decoded = struct.unpack('!4s2xbbLL16s16s16s', data)
+    print(f'datagram_received: {decoded} from {addr}')
+    magic, announce, powering_off, version, port, device, model, serial = decoded
+    if magic.decode() != self.MAGIC:
+      return
+    if announce:
+      if device == struct.pack('!16s', self.PROXY_MAGIC.encode()):
+        print('Ignoring proxy discovery packet')
+        return
+      return self.on_discovery_request(addr)
+    else:
+      return self.on_discovery_reply(host, port, version, device, model, serial)
+
+  def data_received(self, data):
+    print(f'data_received: {data} from {self.tcp.get_extra_info("peername")}')
+    if not self.proxied_host or not self.proxied_port:
+      print("Can't reply without proxy")
+      return
+    proxied_addr = (self.proxied_host, self.proxied_port)
+
+    # XXX wrap
+    class Hack(asyncio.Protocol):
+      def __init__(self, proxy_transport, data):
+        self.proxy_transport = proxy_transport
+        self.request = data
+        self.response = None
+
+      def connection_made(self, transport):
+        transport.write(self.request)
+
+      def data_received(self, data):
+        print(f'proxy response: {data.decode()}')
+        self.response = data
+        self.proxy_transport.write(data)
+        #self.proxy_transport.close()
+
+    async def doit(proxy, data):
+      loop = asyncio.get_running_loop()
+      hack = Hack(proxy.tcp, data)
+      transport, protocol = await loop.create_connection(lambda: hack, proxy.proxied_host, proxy.proxied_port)
+      deadline = 3
+      try:
+        while deadline > 0:
+          if hack.response:
+            break
+          await asyncio.sleep(1)
+          deadline -= 1
+      finally:
+        transport.close()
+
+    asyncio.ensure_future(doit(self, data))
+
+async def main(args):
+  loop = asyncio.get_running_loop()
+  future = loop.create_future() # XXX needed?
+  proxy = AnthemDiscoveryProxy(future, args.host, args.port, device = args.name, model = args.model, serial = args.serial)
+  host = args.bind
+  port = args.listen
+
+  transport, discovery = await loop.create_datagram_endpoint(lambda: proxy, local_addr = (host, port), reuse_port = True, allow_broadcast = True)
+  server = await loop.create_server(lambda: proxy, host, port, reuse_port = True)
+
+  try:
+    if not proxy.proxied_serial:
+      await discovery.query()
+    await server.serve_forever()
+    #while True:
+      #await asyncio.sleep(3)
+  finally:
+    transport.close()
+
+parser = argparse.ArgumentParser('anthem_proxy')
+parser.add_argument('-a', '--name', help = 'Proxy name')
+parser.add_argument('-b', '--bind', default = '0.0.0.0', help = 'Bind address')
+parser.add_argument('-d', '--debug', action = 'store_true', help = 'Debug mode')
+parser.add_argument('-l', '--listen', type = int, default = 14999, help = 'Bind port')
+parser.add_argument('-m', '--model', help = 'Device model')
+parser.add_argument('-p', '--port', type = int, default = 14999, help = 'Device port')
+parser.add_argument('-s', '--serial', help = 'Device serial number')
+parser.add_argument('-t', '--host', help = 'Target device IP or hostname')
+args = parser.parse_args()
+
+asyncio.run(main(args))
