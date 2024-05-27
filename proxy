@@ -2,7 +2,95 @@
 
 import argparse
 import asyncio
+import json
 import struct
+
+class AnthemDevice(object):
+  MODEL = 'Anthem Proxy'
+  PORT = 14999
+
+  def __init__(self, *, host = None, port = None, proxy = None, name = None, model = None, serial = None):
+    self.name = self.from_bytes(name)
+    self.host = host
+    self.port = port or self.PORT
+    self.serial = self.from_bytes(serial)
+    if proxy is not None:
+      self.proxy = proxy
+      self.model = self.MODEL if proxy else self.from_bytes(model)
+    else:
+      self.model = self.from_bytes(model)
+      self.proxy = model == self.MODEL
+
+  def from_bytes(self, b):
+    if not b:
+      return ''
+    if type(b) is str:
+      return b
+    return b.decode().rstrip('\0')
+
+  @property
+  def valid(self):
+    return len(self.name) and len(self.model) and len(self.serial)
+
+  @property
+  def bytes_name(self):
+    return self.name.encode('utf-8') if self.name else b''
+
+  @property
+  def bytes_model(self):
+    return self.model.encode('utf-8') if self.model else b''
+
+  @property
+  def bytes_serial(self):
+    return self.serial.encode('utf-8') if self.serial else b''
+
+class AnthemDiscoveryPacket(object):
+  MAGIC = 'PARC'
+  VERSION = 1
+  FORMAT = '!4s2xbbLL16s16s16s'
+
+  def __init__(self, *, discover = False, shutting_down = False, version = None, port = None, device = None):
+    if device is None:
+      device = AnthemDevice(proxy = True, port = port)
+    elif type(device) is not AnthemDevice:
+      raise Exception('AnthemDiscoveryPacket device parameter must be None or instance of AnthemDevice')
+
+    self.discover = discover
+    self.shutting_down = shutting_down
+    self.version = version if version is not None else self.VERSION
+    self.device = device
+    self.proxy = device.proxy if device is not None else False
+    self.buffer = struct.pack(self.FORMAT, self.MAGIC.encode('utf-8'), 1 if self.discover else 0, 1 if self.shutting_down else 0, self.version, self.device.port, self.device.bytes_name, self.device.bytes_model, self.device.bytes_serial)
+
+  @classmethod
+  def receive(self, buffer, addr):
+    try:
+      magic, discover, shutting_down, version, port, name, model, serial = struct.unpack(self.FORMAT, buffer)
+    except Exception as e:
+      print(f'oops: {str(e)}')
+      raise Exception('AnthemDiscoveryPacket.receive requires a valid packed buffer')
+
+    discover = bool(discover)
+    shutting_down = bool(shutting_down)
+    host = addr[0] if addr is not None else None
+    device = AnthemDevice(host = host, port = port, name = name, model = model, serial = serial)
+    if not discover and not device.valid:
+      print(f'bad device {buffer}; discover: {discover}')
+      raise Exception('AnthemDiscoveryPacket with invalid device')
+
+    return AnthemDiscoveryPacket(discover = discover, shutting_down = shutting_down if not discover else False, version = version, port = port, device = device)
+
+  @property
+  def json(self):
+    if self.device is None:
+      return ''
+    return json.dumps({
+      'host': self.device.host,
+      'port': self.device.port,
+      'name': self.device.name,
+      'model': self.device.model,
+      'serial': self.device.serial
+    })
 
 class AnthemProxy(asyncio.Protocol):
   MAGIC = 'PARC'
@@ -136,11 +224,54 @@ class AnthemProxy(asyncio.Protocol):
 
     asyncio.ensure_future(doit(self, data))
 
+class AnthemDiscovery(asyncio.Protocol):
+  def __init__(self, *, host = None, port = None):
+    self.host = host or '0.0.0.0'
+    self.port = port or 14999
+    self.packet = AnthemDiscoveryPacket(discover = True)
+    self.seen = {}
+
+  async def run(self):
+    loop = asyncio.get_running_loop()
+    self.transport, self.discovery = await loop.create_datagram_endpoint(lambda: self, local_addr = (self.host, self.port), reuse_port = True, allow_broadcast = True)
+
+    try:
+      while True:
+        self.transport.sendto(self.packet.buffer, ('255.255.255.255', AnthemDevice.PORT))
+        await asyncio.sleep(1)
+    finally:
+      self.transport.close()
+
+  def datagram_received(self, data, addr):
+    if self.seen.get(data):
+      return
+    packet = None
+    try:
+      packet = AnthemDiscoveryPacket.receive(data, addr)
+    except:
+      return
+
+    if not packet:
+      return
+    if packet.discover:
+      return
+    if not packet.device:
+      return
+    print(packet.json)
+    self.seen[data] = True
+
+async def discover(host = None, port = None):
+  protocol = AnthemDiscovery(host = host, port = port)
+  await protocol.run()
+
 async def main(args):
-  loop = asyncio.get_running_loop()
-  proxy = AnthemProxy(args.host, args.port, device = args.name, model = args.model, serial = args.serial)
   host = args.bind
   port = args.listen
+  if args.action is not None:
+    if args.action == 'discover':
+      return await discover(host = args.bind, port = args.listen)
+  loop = asyncio.get_running_loop()
+  proxy = AnthemProxy(args.host, args.port, device = args.name, model = args.model, serial = args.serial)
 
   transport, discovery = await loop.create_datagram_endpoint(lambda: proxy, local_addr = (host, port), reuse_port = True, allow_broadcast = True)
   server = await loop.create_server(lambda: proxy, host, port, reuse_port = True)
@@ -163,6 +294,7 @@ parser.add_argument('-m', '--model', help = 'Device model')
 parser.add_argument('-p', '--port', type = int, default = 14999, help = 'Device port')
 parser.add_argument('-s', '--serial', help = 'Device serial number')
 parser.add_argument('-t', '--host', help = 'Target device IP or hostname')
+parser.add_argument('action', choices = ['discover'], nargs = '?')
 args = parser.parse_args()
 
 asyncio.run(main(args))
