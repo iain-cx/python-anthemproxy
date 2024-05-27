@@ -4,13 +4,12 @@ import argparse
 import asyncio
 import struct
 
-class AnthemDiscoveryProxy(asyncio.Protocol):
+class AnthemProxy(asyncio.Protocol):
   MAGIC = 'PARC'
   PROXY_MAGIC = 'Anthem Proxy'
 
-  def __init__(self, future, host = None, port = None, device = None, model = None, serial = None):
+  def __init__(self, host = None, port = None, device = None, model = None, serial = None):
     print('__init__')
-    self.future = future # XXX
     self.udp = None
     self.tcp = None
     self.proxied_host = host
@@ -29,7 +28,6 @@ class AnthemDiscoveryProxy(asyncio.Protocol):
 
   def connection_lost(self, e):
     print('connection_lost')
-    #self.future.set_result(True)
 
   def from_bytes(self, b):
     return b.decode().rstrip('\0')
@@ -140,8 +138,7 @@ class AnthemDiscoveryProxy(asyncio.Protocol):
 
 async def main(args):
   loop = asyncio.get_running_loop()
-  future = loop.create_future() # XXX needed?
-  proxy = AnthemDiscoveryProxy(future, args.host, args.port, device = args.name, model = args.model, serial = args.serial)
+  proxy = AnthemProxy(args.host, args.port, device = args.name, model = args.model, serial = args.serial)
   host = args.bind
   port = args.listen
 
