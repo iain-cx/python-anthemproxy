@@ -4,7 +4,9 @@ import argparse
 import asyncio
 import ctypes
 import json
+import logging
 import multiprocessing
+import os
 import struct
 
 def btos(b):
@@ -91,7 +93,7 @@ class AnthemDiscoveryPacket(object):
     try:
       magic, discover, shutting_down, version, port, name, model, serial = struct.unpack(self.FORMAT, buffer)
     except Exception as e:
-      print(f'oops: {str(e)}')
+      logging.error(f'oops: {str(e)}')
       raise Exception('AnthemDiscoveryPacket.receive requires a valid packed buffer')
 
     discover = bool(discover)
@@ -99,7 +101,7 @@ class AnthemDiscoveryPacket(object):
     host = addr[0] if addr is not None else None
     device = AnthemDevice(host = host, port = port, name = name, model = model, serial = serial)
     if not discover and not device.usable:
-      print(f'bad device {buffer}; discover: {discover}')
+      logging.error(f'bad device {buffer}; discover: {discover}')
       raise Exception('AnthemDiscoveryPacket with invalid device')
 
     return AnthemDiscoveryPacket(discover = discover, shutting_down = shutting_down if not discover else False, version = version, port = port, device = device)
@@ -121,7 +123,7 @@ class AnthemProxy(asyncio.Protocol):
   PROXY_MAGIC = 'Anthem Proxy'
 
   def __init__(self, host = None, port = None, device = None, model = None, serial = None):
-    print('__init__')
+    logging.debug('__init__')
     self.udp = None
     self.tcp = None
     self.proxied_host = host
@@ -132,14 +134,14 @@ class AnthemProxy(asyncio.Protocol):
     self.proxied_serial = serial
 
   def connection_made(self, transport):
-    print('connection_made')
+    logging.debug('connection_made')
     if type(transport) is asyncio.selector_events._SelectorDatagramTransport: # XXX
       self.udp = transport
     else:
       self.tcp = transport
 
   def connection_lost(self, e):
-    print('connection_lost')
+    logging.debug('connection_lost')
 
   async def query(self):
     addr = ('255.255.255.255', AnthemDevice.PORT)
@@ -153,27 +155,27 @@ class AnthemProxy(asyncio.Protocol):
     if serial is None:
       serial = ''
     buffer = struct.pack('!4s2xbbLL16s16s16s', self.MAGIC.encode(), 1 if announce else 0, 0, version, port or AnthemDevice.PORT, device.encode(), model.encode(), serial.encode())
-    print(f'Sending packet: {buffer} to {addr}')
+    logging.debug(f'Sending packet: {buffer} to {addr}')
     return self.udp.sendto(buffer, addr)
 
   def on_discovery_request(self, addr):
     host, port = addr
-    print(f'Discovery request from {host}')
+    logging.debug(f'Discovery request from {host}')
     if not self.proxied_device or not self.proxied_host:
-      print("Can't respond yet")
+      logging.debug("Can't respond yet")
       return
     return self.send_discovery_packet(addr, version = self.proxied_version, device = self.proxied_device, model = self.proxied_model, serial = self.proxied_serial)
 
   def on_discovery_reply(self, host, port, version, device, model, serial):
     if self.proxied_host and host != self.proxied_host:
-      print(f'Ignoring reply from {host} not {self.proxied_host}')
+      logging.debug(f'Ignoring reply from {host} not {self.proxied_host}')
       return
     if self.proxied_port and port != self.proxied_port:
-      print(f'Ignoring reply from port {port} not {self.proxied_port}')
+      logging.debug(f'Ignoring reply from port {port} not {self.proxied_port}')
       return
     self.proxied_host = host
     self.proxied_port = port
-    print(f'Device: {device.decode()}; model: {model.decode()}; serial: {serial.decode()}')
+    logging.info(f'Device: {device.decode()}; model: {model.decode()}; serial: {serial.decode()}')
     proxied_device = btos(device)
     if len(proxied_device) < 10:
       proxied_device += ' proxy'
@@ -187,22 +189,22 @@ class AnthemProxy(asyncio.Protocol):
   def datagram_received(self, data, addr):
     host, port = addr
     decoded = struct.unpack('!4s2xbbLL16s16s16s', data)
-    print(f'datagram_received: {decoded} from {addr}')
+    logging.debug(f'datagram_received: {decoded} from {addr}')
     magic, announce, powering_off, version, port, device, model, serial = decoded
     if magic.decode() != self.MAGIC:
       return
     if announce:
       if device == struct.pack('!16s', self.PROXY_MAGIC.encode()):
-        print('Ignoring proxy discovery packet')
+        logging.debug('Ignoring proxy discovery packet')
         return
       return self.on_discovery_request(addr)
     else:
       return self.on_discovery_reply(host, port, version, device, model, serial)
 
   def data_received(self, data):
-    print(f'data_received: {data} from {self.tcp.get_extra_info("peername")}')
+    logging.debug(f'data_received: {data} from {self.tcp.get_extra_info("peername")}')
     if not self.proxied_host or not self.proxied_port:
-      print("Can't reply without proxy")
+      logging.debug("Can't reply without proxy")
       return
     proxied_addr = (self.proxied_host, self.proxied_port)
 
@@ -217,7 +219,7 @@ class AnthemProxy(asyncio.Protocol):
         transport.write(self.request)
 
       def data_received(self, data):
-        print(f'proxy response: {data.decode()}')
+        logging.debug(f'proxy response: {data.decode()}')
         self.response = data
         self.proxy_transport.write(data)
         #self.proxy_transport.close()
@@ -294,10 +296,10 @@ async def proxy(host, port, target):
       return AnthemDiscovery.CONTINUE
     if target_host.value:
       if packet.device.host != target_host.value:
-        print(f'wrong host: {packet.device.host} not {target_host.value}')
+        logging.debug(f'wrong host: {packet.device.host} not {target_host.value}')
         return AnthemDiscovery.CONTINUE
       if packet.device.port != target_port.value:
-        print(f'wrong port: {packet.device.port} not {target_port.value}')
+        logging.debug(f'wrong port: {packet.device.port} not {target_port.value}')
         return AnthemDiscovery.CONTINUE
     serialised.value = packet.device.json
     return AnthemDiscovery.STOP
@@ -316,18 +318,18 @@ async def proxy(host, port, target):
     if not target.host:
       target.host = canon.host
       target.port = canon.port
-      print(f'discovered host: {target.host}')
+      logging.debug(f'discovered host: {target.host}')
     if not target.name:
       target.name = canon.name
-      print(f'discovered name: {target.name}')
+      logging.debug(f'discovered name: {target.name}')
     if not target.model:
       target.model = canon.model
-      print(f'discovered model: {target.model}')
+      logging.debug(f'discovered model: {target.model}')
     if not target.serial:
       target.serial = canon.serial
-      print(f'discovered serial: {target.serial}')
+      logging.debug(f'discovered serial: {target.serial}')
 
-  print(f'Proxying: {target.json}')
+  logging.info(f'Proxying: {target.json}')
   # XXX
   loop = asyncio.get_running_loop()
   proxy = AnthemProxy(host, port, device = target.name, model = target.model, serial = target.serial)
@@ -361,5 +363,7 @@ parser.add_argument('-s', '--serial', help = 'Device serial number')
 parser.add_argument('-t', '--host', help = 'Target device IP or hostname')
 parser.add_argument('action', choices = ['discover', 'proxy'], nargs = 1)
 args = parser.parse_args()
+
+logging.basicConfig(level = logging.DEBUG if args.debug or os.getenv('DEBUG') else logging.INFO, format = r'%(asctime)s %(module)s %(levelname)s: %(message)s', datefmt = r'%Y-%m-%dT%H:%M:%SZ')
 
 asyncio.run(main(args))
