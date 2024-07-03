@@ -332,7 +332,7 @@ async def proxy(host, port, target):
   logging.info(f'Proxying: {target.json}')
   # XXX
   loop = asyncio.get_running_loop()
-  proxy = AnthemProxy(host, port, device = target.name, model = target.model, serial = target.serial)
+  proxy = AnthemProxy(target.host, target.port, device = target.name, model = target.model, serial = target.serial)
 
   transport, discovery = await loop.create_datagram_endpoint(lambda: proxy, local_addr = (host, port), reuse_port = True, allow_broadcast = True)
   server = await loop.create_server(lambda: proxy, host, port, reuse_port = True)
