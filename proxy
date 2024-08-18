@@ -321,9 +321,10 @@ class AnthemDiscovery(asyncio.Protocol):
   CONTINUE = True
   STOP = False
 
-  def __init__(self, *, host = None, port = None, on_receive = None):
+  def __init__(self, *, host = None, port = None, broadcast = None, on_receive = None):
     self.host = host or AnthemDevice.LISTEN
     self.port = port or AnthemDevice.PORT
+    self.broadcast = broadcast or AnthemDevice.BROADCAST
     self.packet = AnthemDiscoveryPacket(discover = True)
     self.on_receive = on_receive if on_receive is not None else lambda packet: False
     self.transport = None
@@ -339,7 +340,7 @@ class AnthemDiscovery(asyncio.Protocol):
     logging.debug('Listening for responses to %s:%u.', self.host, self.port)
     try:
       while self.listen:
-        self.transport.sendto(self.packet.buffer, (AnthemDevice.BROADCAST, AnthemDevice.PORT))
+        self.transport.sendto(self.packet.buffer, (self.broadcast, AnthemDevice.PORT))
         await asyncio.sleep(0.5)
     finally:
       self.transport.close()
@@ -360,7 +361,7 @@ class AnthemDiscovery(asyncio.Protocol):
     if self.on_receive(packet) == self.STOP:
       self.listen = False
 
-async def discover(host, port):
+async def discover(bind, port, broadcast):
   seen = {}
 
   def show_device(packet):
@@ -370,7 +371,7 @@ async def discover(host, port):
     seen[output] = True
     return AnthemDiscovery.CONTINUE
 
-  discovery = AnthemDiscovery(host = host, port = port, on_receive = show_device)
+  discovery = AnthemDiscovery(host = bind, port = port, broadcast = broadcast, on_receive = show_device)
   return await discovery.run()
 
 async def proxy(bind, listen, host, port, alias, name, model, serial):
@@ -396,7 +397,7 @@ async def proxy(bind, listen, host, port, alias, name, model, serial):
       target_host.value = target.host
       target_port.value = target.port
     serialised = multiprocessing.Value(ctypes.c_wchar_p, '')
-    discovery = AnthemDiscovery(host = bind, port = listen, on_receive = query_device)
+    discovery = AnthemDiscovery(host = bind, port = listen, broadcast = host, on_receive = query_device)
     await discovery.run()
 
     canon = AnthemDevice.from_json(serialised.value)
@@ -423,7 +424,7 @@ async def main(args):
   port = args.listen
   action = args.action[0]
   if action == 'discover':
-    return await discover(host = host, port = port)
+    return await discover(bind = args.bind, port = port, broadcast = args.host)
   elif action == 'proxy':
     return await proxy(bind = args.bind, listen = args.listen, host = args.host, port = args.port, alias = args.alias, name = args.name, model = args.model, serial = args.serial)
 
