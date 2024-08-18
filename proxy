@@ -100,15 +100,24 @@ class AnthemDiscoveryPacket(object):
 
   @classmethod
   def receive(self, buffer, addr):
+    host = None
     try:
       magic, discover, shutting_down, version, port, name, model, serial = struct.unpack(self.FORMAT, buffer)
+      if addr is not None:
+        host, port = addr
+        logging.debug('Discovery packet received from %s:%u.', host, port)
+      else:
+        logging.debug('Discovery packet received.')
     except Exception as e:
-      logging.error('Receiving discovery packet: %s', e)
+      logging.error('Receiving discovery packet from %s:%u: %s', host, port, e)
       raise Exception('AnthemDiscoveryPacket.receive requires a valid packed buffer')
+
+    if not AnthemDiscoveryPacket.check_magic(magic):
+      logging.debug('Bad magic in discovery packet.')
+      raise Exception('AnthemDiscoveryPacket.receive got bad magic')
 
     discover = bool(discover)
     shutting_down = bool(shutting_down)
-    host = addr[0] if addr is not None else None
     device = AnthemDevice(host = host, port = port, name = name, model = model, serial = serial)
     if not discover and not device.usable:
       host, port = addr
@@ -256,10 +265,8 @@ class AnthemProxy(asyncio.Protocol):
       self.listen = False
 
   def on_discovery_request(self, addr):
-    host, port = addr
-    logging.debug('Discovery request from %s:%u', host, port)
     if not self.device.name or not self.device.host:
-      logging.debug("Can't respond yet")
+      logging.debug("Can't respond yet.")
       return
     packet = AnthemDiscoveryPacket(device = self.device)
     try:
@@ -295,18 +302,13 @@ class AnthemProxy(asyncio.Protocol):
     except:
       return
     host, port = addr
-    decoded = struct.unpack('!4s2xbbLL16s16s16s', data)
-    logging.debug('datagram_received: %s, from %s:%u', decoded, host, port)
-    magic, announce, powering_off, version, port, name, model, serial = decoded
-    if not AnthemDiscoveryPacket.check_magic(magic):
-      return
-    if announce:
-      if self.check_model(model):
+    if packet.discover:
+      if self.check_model(packet.device.model):
         logging.debug('Ignoring proxy discovery packet')
         return
       return self.on_discovery_request(addr)
     else:
-      return self.on_discovery_reply(host, port, version, name, model, serial)
+      return self.on_discovery_reply(host, port, packet.device.version, packet.device.name, packet.device.model, packet.device.serial)
 
   def client_request(self, data):
     if not self.device.host or not self.device.port:
