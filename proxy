@@ -101,13 +101,18 @@ class AnthemDiscoveryPacket(object):
   @classmethod
   def receive(self, buffer, addr):
     host = None
+    discover = None
+    packet_type = 'Discovery'
     try:
       magic, discover, shutting_down, version, port, name, model, serial = struct.unpack(self.FORMAT, buffer)
+      discover = bool(discover)
+      if not discover:
+        packet_type = 'Response'
       if addr is not None:
         host, port = addr
-        logging.debug('Discovery packet received from %s:%u.', host, port)
+        logging.debug('%s packet received from %s:%u.', packet_type, host, port)
       else:
-        logging.debug('Discovery packet received.')
+        logging.debug('%s packet received.', packet_type)
     except Exception as e:
       logging.error('Receiving discovery packet from %s:%u: %s', host, port, e)
       raise Exception('AnthemDiscoveryPacket.receive requires a valid packed buffer')
@@ -116,12 +121,10 @@ class AnthemDiscoveryPacket(object):
       logging.debug('Bad magic in discovery packet.')
       raise Exception('AnthemDiscoveryPacket.receive got bad magic')
 
-    discover = bool(discover)
     shutting_down = bool(shutting_down)
     device = AnthemDevice(host = host, port = port, name = name, model = model, serial = serial)
     if not discover and not device.usable:
-      host, port = addr
-      logging.error('Bad device in %s packet from %s:%u: %s', 'discovery' if discover else 'response', host, port, buffer)
+      logging.error('Bad device in %s packet from %s:%u: %s', packet_type.lower(), host, port, buffer)
       raise Exception('AnthemDiscoveryPacket with invalid device')
 
     return AnthemDiscoveryPacket(discover = discover, shutting_down = shutting_down if not discover else False, port = port, device = device)
@@ -264,15 +267,17 @@ class AnthemProxy(asyncio.Protocol):
       # XXX: Need to reconnect
       self.listen = False
 
-  def on_discovery_request(self, addr):
+  def on_discovery_request(self, host, port):
+    addr = (host, port)
     if not self.device.name or not self.device.host:
       logging.debug("Can't respond yet.")
       return
     packet = AnthemDiscoveryPacket(device = self.device)
     try:
+      logging.debug('Responding to %s:%u', host, port)
       packet.send(self.discovery, addr)
     except Exception as e:
-      logging.error('Sending discovery packet: %s', e)
+      logging.error('Sending discovery packet to %s:%u: %s', host, port, e)
       self.discovery.close()
 
   def on_discovery_reply(self, host, port, version, name, model, serial):
@@ -303,10 +308,10 @@ class AnthemProxy(asyncio.Protocol):
       return
     host, port = addr
     if packet.discover:
-      if self.check_model(packet.device.model):
+      if packet.proxy:
         logging.debug('Ignoring proxy discovery packet')
         return
-      return self.on_discovery_request(addr)
+      return self.on_discovery_request(host, port)
     else:
       return self.on_discovery_reply(host, port, packet.device.version, packet.device.name, packet.device.model, packet.device.serial)
 
@@ -380,13 +385,6 @@ async def proxy(bind, listen, host, port, alias, name, model, serial):
   def query_device(packet):
     if packet.discover:
       return AnthemDiscovery.CONTINUE
-    if target_host.value:
-      if packet.device.host != target_host.value:
-        logging.debug('Wrong host: %s not %s', packet.device.host, target_host.value)
-        return AnthemDiscovery.CONTINUE
-      if packet.device.port != target_port.value:
-        logging.debug('Wrong port: %s not %s', packet.device.port, target_port.value)
-        return AnthemDiscovery.CONTINUE
     serialised.value = packet.device.json
     return AnthemDiscovery.STOP
 
@@ -403,7 +401,7 @@ async def proxy(bind, listen, host, port, alias, name, model, serial):
     await discovery.run()
 
     canon = AnthemDevice.from_json(serialised.value)
-    if not target.host:
+    if not target.host or target.host != canon.host:
       target.host = canon.host
       target.port = canon.port
       logging.debug('Discovered host: %s', target.host)
