@@ -220,7 +220,7 @@ class AnthemProxyClient(asyncio.Protocol):
 class AnthemProxy(asyncio.Protocol):
   MODEL = 'Anthem Proxy'
 
-  def __init__(self, device, host = None, port = None):
+  def __init__(self, device, host = None, port = None, forward = None):
     self.clients = set()
     self.device = device
     self.host = host or AnthemDevice.LISTEN
@@ -229,6 +229,7 @@ class AnthemProxy(asyncio.Protocol):
     self.protocol = None
     self.discovery = None
     self.listen = True
+    self.forward = forward or False
     self.server = None
 
   @classmethod
@@ -308,7 +309,7 @@ class AnthemProxy(asyncio.Protocol):
       return
     host, port = addr
     if packet.discover:
-      if packet.proxy:
+      if packet.proxy and not self.forward:
         logging.debug('Ignoring proxy discovery packet')
         return
       return self.on_discovery_request(host, port)
@@ -328,7 +329,7 @@ class AnthemDiscovery(asyncio.Protocol):
   CONTINUE = True
   STOP = False
 
-  def __init__(self, *, host = None, port = None, broadcast = None, on_receive = None):
+  def __init__(self, *, host = None, port = None, broadcast = None, on_receive = None, forward = None):
     self.host = host or AnthemDevice.LISTEN
     self.port = port or AnthemDevice.PORT
     self.broadcast = broadcast or AnthemDevice.BROADCAST
@@ -337,6 +338,7 @@ class AnthemDiscovery(asyncio.Protocol):
     self.transport = None
     self.protocol = None
     self.listen = True
+    self.forward = forward or False
     self.server = None
 
   async def run(self):
@@ -368,7 +370,7 @@ class AnthemDiscovery(asyncio.Protocol):
     if self.on_receive(packet) == self.STOP:
       self.listen = False
 
-async def discover(bind, port, broadcast):
+async def discover(bind, port, broadcast, forward = False):
   seen = {}
 
   def show_device(packet):
@@ -378,10 +380,10 @@ async def discover(bind, port, broadcast):
     seen[output] = True
     return AnthemDiscovery.CONTINUE
 
-  discovery = AnthemDiscovery(host = bind, port = port, broadcast = broadcast, on_receive = show_device)
+  discovery = AnthemDiscovery(host = bind, port = port, broadcast = broadcast, on_receive = show_device, forward = forward)
   return await discovery.run()
 
-async def proxy(bind, listen, host, port, alias, name, model, serial):
+async def proxy(bind, listen, host, port, alias, name, model, serial, forward = False):
   def query_device(packet):
     if packet.discover:
       return AnthemDiscovery.CONTINUE
@@ -397,7 +399,7 @@ async def proxy(bind, listen, host, port, alias, name, model, serial):
       target_host.value = target.host
       target_port.value = target.port
     serialised = multiprocessing.Value(ctypes.c_wchar_p, '')
-    discovery = AnthemDiscovery(host = bind, port = listen, broadcast = host, on_receive = query_device)
+    discovery = AnthemDiscovery(host = bind, port = listen, broadcast = host, on_receive = query_device, forward = forward)
     await discovery.run()
 
     canon = AnthemDevice.from_json(serialised.value)
@@ -416,7 +418,7 @@ async def proxy(bind, listen, host, port, alias, name, model, serial):
       logging.debug('Discovered serial: %s', target.serial)
 
   logging.info('Proxying: %s', target.json)
-  proxy = AnthemProxy(target, bind, listen)
+  proxy = AnthemProxy(target, bind, listen, forward = forward)
   return await proxy.run()
 
 async def main(args):
@@ -424,14 +426,15 @@ async def main(args):
   port = args.listen
   action = args.action[0]
   if action == 'discover':
-    return await discover(bind = args.bind, port = port, broadcast = args.host)
+    return await discover(bind = args.bind, port = port, broadcast = args.host, forward = args.forward)
   elif action == 'proxy':
-    return await proxy(bind = args.bind, listen = args.listen, host = args.host, port = args.port, alias = args.alias, name = args.name, model = args.model, serial = args.serial)
+    return await proxy(bind = args.bind, listen = args.listen, host = args.host, port = args.port, alias = args.alias, name = args.name, model = args.model, serial = args.serial, forward = args.forward)
 
 parser = argparse.ArgumentParser('anthem_proxy')
 parser.add_argument('-a', '--alias', help = 'Proxy name')
 parser.add_argument('-b', '--bind', default = AnthemDevice.LISTEN, help = 'Bind address')
 parser.add_argument('-d', '--debug', action = 'store_true', help = 'Debug mode')
+parser.add_argument('-f', '--forward', action = 'store_true', help = 'Accept requests from other proxies')
 parser.add_argument('-l', '--listen', type = int, default = AnthemDevice.PORT, help = 'Bind port')
 parser.add_argument('-m', '--model', help = 'Device model')
 parser.add_argument('-n', '--name', help = 'Device name')
