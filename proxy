@@ -430,17 +430,33 @@ async def main(args):
   elif action == 'proxy':
     return await proxy(bind = args.bind, listen = args.listen, host = args.host, port = args.port, alias = args.alias, name = args.name, model = args.model, serial = args.serial, forward = args.forward)
 
+def env_or_arg(parser, *args, **kwargs):
+  canon = { k: v for k, v in kwargs.items() }
+  for arg in args:
+    if arg.startswith('--'):
+      key = '_'.join(['ANTHEMPROXY', arg[2:].upper()])
+      value = os.environ.get(key, kwargs.get('default'))
+      coerce = kwargs.get('type', str)
+      if coerce is bool:
+        del(canon['type'])
+      if value is not None:
+        try:
+          canon['default'] = coerce(value)
+        except:
+          pass
+  parser.add_argument(*args, **canon)
+
 parser = argparse.ArgumentParser('anthem_proxy')
-parser.add_argument('-a', '--alias', help = 'Proxy name')
-parser.add_argument('-b', '--bind', default = AnthemDevice.LISTEN, help = 'Bind address')
-parser.add_argument('-d', '--debug', action = 'store_true', help = 'Debug mode')
-parser.add_argument('-f', '--forward', action = 'store_true', help = 'Accept requests from other proxies')
-parser.add_argument('-l', '--listen', type = int, default = AnthemDevice.PORT, help = 'Bind port')
-parser.add_argument('-m', '--model', help = 'Device model')
-parser.add_argument('-n', '--name', help = 'Device name')
-parser.add_argument('-p', '--port', type = int, default = AnthemDevice.PORT, help = 'Device port')
-parser.add_argument('-s', '--serial', help = 'Device serial number')
-parser.add_argument('-t', '--host', help = 'Target device IP or hostname')
+env_or_arg(parser, '-a', '--alias', help = 'Proxy name')
+env_or_arg(parser, '-b', '--bind', default = AnthemDevice.LISTEN, help = 'Bind address')
+env_or_arg(parser, '-d', '--debug', type = bool, action = 'store_true', help = 'Debug mode')
+env_or_arg(parser, '-f', '--forward', type = bool, action = 'store_true', help = 'Accept requests from other proxies')
+env_or_arg(parser, '-l', '--listen', type = int, default = AnthemDevice.PORT, help = 'Bind port')
+env_or_arg(parser, '-m', '--model', help = 'Device model')
+env_or_arg(parser, '-n', '--name', help = 'Device name')
+env_or_arg(parser, '-p', '--port', type = int, default = AnthemDevice.PORT, help = 'Device port')
+env_or_arg(parser, '-s', '--serial', help = 'Device serial number')
+env_or_arg(parser, '-t', '--host', help = 'Target device IP or hostname')
 parser.add_argument('action', choices = ['discover', 'proxy'], nargs = 1)
 args = parser.parse_args()
 
