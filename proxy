@@ -9,8 +9,10 @@ import multiprocessing
 import os
 import struct
 
-# Helper class to encode and decode protocol messages.
+# Helper class to filter protocol messages.
 class AnthemProtocol(object):
+  EMPTY = str.maketrans({ ' ': '', ';': '' })
+
   @classmethod
   def decode(self, b):
     if b is None:
@@ -26,6 +28,10 @@ class AnthemProtocol(object):
     if type(s) is str and s:
       return s.encode('utf-8')
     return b''
+
+  @classmethod
+  def empty(self, data):
+    return not data.translate(AnthemProtocol.EMPTY)
 
 # An Anthem device.
 class AnthemDevice(object):
@@ -181,8 +187,12 @@ class AnthemProxyClient(asyncio.Protocol):
     self.proxy.client_disconnected(self)
 
   def data_received(self, data):
-    logging.debug('Request from client %s:%u: %s', self.host, self.port, AnthemProtocol.decode(data))
-    self.proxy.client_request(data)
+    message = AnthemProtocol.decode(data)
+    if AnthemProtocol.empty(message):
+      logging.debug('Empty request from client %s:%u.', self.host, self.port)
+    else:
+      logging.debug('Request from client %s:%u: %s', self.host, self.port, AnthemProtocol.decode(data))
+      self.proxy.client_request(data)
 
   def write(self, data):
     if self.connected:
@@ -244,8 +254,12 @@ class AnthemProxyConnection(asyncio.Protocol):
       self.reconnect()
 
   def data_received(self, data):
-    logging.debug('Message from device: %s', AnthemProtocol.decode(data))
-    self.proxy.proxy_response(data)
+    message = AnthemProtocol.decode(data)
+    if AnthemProtocol.empty(message):
+      logging.debug('Empty message from device.')
+    else:
+      logging.debug('Message from device: %s', message)
+      self.proxy.proxy_response(data)
 
 # A proxy for an AnthemDevice.
 class AnthemProxy(asyncio.Protocol):
