@@ -9,38 +9,8 @@ import multiprocessing
 import os
 import struct
 
-# An Anthem device.
-class AnthemDevice(object):
-  LISTEN = '0.0.0.0'
-  BROADCAST = '255.255.255.255'
-  PORT = 14999
-  VERSION = 1
-
-  def __init__(self, *, host = None, port = None, proxy = None, alias = None, name = None, model = None, serial = None, version = None):
-    self.alias = AnthemDevice.decode(alias)
-    self.name = AnthemDevice.decode(name)
-    self.host = host
-    self.port = port or self.PORT
-    self.version = version or self.VERSION
-    self.serial = AnthemDevice.decode(serial)
-    if proxy is not None:
-      self.proxy = proxy
-      self.model = AnthemProxy.MODEL if proxy else AnthemDevice.decode(model)
-    else:
-      self.model = AnthemDevice.decode(model)
-      self.proxy = AnthemProxy.check_model(self.model)
-
-  @property
-  def json(self):
-    return json.dumps({
-      'alias': self.alias if self.alias is not None else '',
-      'host': self.host,
-      'port': self.port,
-      'name': self.name,
-      'model': self.model,
-      'serial': self.serial
-    })
-
+# Helper class to encode and decode protocol messages.
+class AnthemProtocol(object):
   @classmethod
   def decode(self, b):
     if b is None:
@@ -56,6 +26,38 @@ class AnthemDevice(object):
     if type(s) is str and s:
       return s.encode('utf-8')
     return b''
+
+# An Anthem device.
+class AnthemDevice(object):
+  LISTEN = '0.0.0.0'
+  BROADCAST = '255.255.255.255'
+  PORT = 14999
+  VERSION = 1
+
+  def __init__(self, *, host = None, port = None, proxy = None, alias = None, name = None, model = None, serial = None, version = None):
+    self.alias = AnthemProtocol.decode(alias)
+    self.name = AnthemProtocol.decode(name)
+    self.host = host
+    self.port = port or self.PORT
+    self.version = version or self.VERSION
+    self.serial = AnthemProtocol.decode(serial)
+    if proxy is not None:
+      self.proxy = proxy
+      self.model = AnthemProxy.MODEL if proxy else AnthemProtocol.decode(model)
+    else:
+      self.model = AnthemProtocol.decode(model)
+      self.proxy = AnthemProxy.check_model(self.model)
+
+  @property
+  def json(self):
+    return json.dumps({
+      'alias': self.alias if self.alias is not None else '',
+      'host': self.host,
+      'port': self.port,
+      'name': self.name,
+      'model': self.model,
+      'serial': self.serial
+    })
 
   @classmethod
   def from_json(self, s):
@@ -93,7 +95,7 @@ class AnthemDiscoveryPacket(object):
     self.shutting_down = shutting_down
     self.device = device
     self.proxy = device.proxy if device is not None else False
-    self.buffer = struct.pack(self.FORMAT, self.MAGIC.encode('utf-8'), 1 if self.discover else 0, 1 if self.shutting_down else 0, self.device.version, self.device.port, AnthemDevice.encode(self.device.alias), AnthemDevice.encode(self.device.model), AnthemDevice.encode(self.device.serial))
+    self.buffer = struct.pack(self.FORMAT, self.MAGIC.encode('utf-8'), 1 if self.discover else 0, 1 if self.shutting_down else 0, self.device.version, self.device.port, AnthemProtocol.encode(self.device.alias), AnthemProtocol.encode(self.device.model), AnthemProtocol.encode(self.device.serial))
 
   @classmethod
   def check_magic(self, magic):
@@ -179,12 +181,12 @@ class AnthemProxyClient(asyncio.Protocol):
     self.proxy.client_disconnected(self)
 
   def data_received(self, data):
-    logging.debug('Request from client %s:%u: %s', self.host, self.port, AnthemDevice.decode(data))
+    logging.debug('Request from client %s:%u: %s', self.host, self.port, AnthemProtocol.decode(data))
     self.proxy.client_request(data)
 
   def write(self, data):
     if self.connected:
-      logging.debug('Writing to client %s:%u: %s', self.host, self.port, AnthemDevice.decode(data))
+      logging.debug('Writing to client %s:%u: %s', self.host, self.port, AnthemProtocol.decode(data))
       self.transport.write(data)
 
 # Connection from the proxy to the target.
@@ -219,7 +221,7 @@ class AnthemProxyConnection(asyncio.Protocol):
   def write(self, data):
     if self.connected:
       try:
-        logging.debug('Writing to device %s: %s', self.proxy.device.name, AnthemDevice.decode(data))
+        logging.debug('Writing to device %s: %s', self.proxy.device.name, AnthemProtocol.decode(data))
         self.transport.write(data)
         return
       except Exception as e:
@@ -242,7 +244,7 @@ class AnthemProxyConnection(asyncio.Protocol):
       self.reconnect()
 
   def data_received(self, data):
-    logging.debug('Message from device: %s', AnthemDevice.decode(data))
+    logging.debug('Message from device: %s', AnthemProtocol.decode(data))
     self.proxy.proxy_response(data)
 
 # A proxy for an AnthemDevice.
@@ -265,7 +267,7 @@ class AnthemProxy(asyncio.Protocol):
 
   @classmethod
   def check_model(self, model):
-    canon = AnthemDevice.decode(model)
+    canon = AnthemProtocol.decode(model)
     return canon == self.MODEL
 
   async def run(self):
@@ -318,16 +320,16 @@ class AnthemProxy(asyncio.Protocol):
       return
     self.device.host = host
     self.device.port = port
-    logging.debug('Device: %s; model: %s; serial: %s', AnthemDevice.decode(name), AnthemDevice.decode(model), AnthemDevice.decode(serial))
+    logging.debug('Device: %s; model: %s; serial: %s', AnthemProtocol.decode(name), AnthemProtocol.decode(model), AnthemProtocol.decode(serial))
     if not self.device.name:
-      self.device.name = AnthemDevice.decode(name)
+      self.device.name = AnthemProtocol.decode(name)
       if len(self.device.name) < 10:
         self.device.name += ' proxy'
       elif len(self.device.name) < 16:
         self.device.name += '*'
     self.device.version = version
-    self.device.model = AnthemDevice.decode(model)
-    self.device.serial = AnthemDevice.decode(serial)
+    self.device.model = AnthemProtocol.decode(model)
+    self.device.serial = AnthemProtocol.decode(serial)
 
   def datagram_received(self, data, addr):
     packet = None
