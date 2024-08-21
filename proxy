@@ -9,6 +9,7 @@ import multiprocessing
 import os
 import struct
 
+# An Anthem device.
 class AnthemDevice(object):
   LISTEN = '0.0.0.0'
   BROADCAST = '255.255.255.255'
@@ -77,6 +78,7 @@ class AnthemDevice(object):
     except TypeError:
       return False
 
+# A discovery or response packet.
 class AnthemDiscoveryPacket(object):
   MAGIC = 'PARC'
   FORMAT = '!4s2xbbLL16s16s16s'
@@ -147,11 +149,12 @@ class AnthemDiscoveryPacket(object):
       'serial': self.device.serial
     })
 
-class AnthemProxyConnection(asyncio.Protocol):
+# Connection from a client to the proxy.
+class AnthemProxyClient(asyncio.Protocol):
   def __init__(self, proxy):
     self.proxy = proxy
     if self.proxy is None:
-      raise Exception('AnthemProxyConnection needs an AnthemProxy!')
+      raise Exception('AnthemProxyClient needs an AnthemProxy!')
     self.transport = None
     self.host = None
     self.port = None
@@ -184,44 +187,72 @@ class AnthemProxyConnection(asyncio.Protocol):
       logging.debug('Writing to client %s:%u: %s', self.host, self.port, AnthemDevice.decode(data))
       self.transport.write(data)
 
-class AnthemProxyClient(asyncio.Protocol):
+# Connection from the proxy to the target.
+class AnthemProxyConnection(asyncio.Protocol):
   def __init__(self, proxy = None):
-    self.request = None
-    self.response = None
     self.proxy = proxy
     if self.proxy is None:
-      raise Exception('AnthemProxyClient needs an AnthemProxy!')
+      raise Exception('AnthemProxyConnection needs an AnthemProxy!')
+    self.transport = None
+    self.protocol = None
+    self.connected = False
+    self.reconnect()
 
-  async def write(self, data):
-    self.request = data
-    loop = asyncio.get_running_loop()
-    self.transport, self.protocol = await loop.create_connection(lambda: self, self.proxy.device.host, self.proxy.device.port)
-    deadline = 3
-    try:
-      while deadline > 0:
-        if self.response:
-          break
-        await asyncio.sleep(1)
-        deadline -= 1
-    finally:
+  async def connect(self, data = None):
+    if not self.transport or self.transport.is_closing():
+      logging.info('Connecting to proxied device: %s', self.proxy.device.name)
+      self.transport, self.protocol = await self.proxy.loop.create_connection(lambda: self, self.proxy.device.host, self.proxy.device.port)
+      if not self.transport.is_closing():
+        self.connected = True
+        if data is not None:
+          self.write(data)
+
+  def reconnect(self, data = None):
+    asyncio.ensure_future(self.connect(data))
+
+  def close(self):
+    if self.transport and not self.transport.is_closing():
       self.transport.close()
+      self.transport = None
+      self.connected = False
+
+  def write(self, data):
+    if self.connected:
+      try:
+        logging.debug('Writing to device %s: %s', self.proxy.device.name, AnthemDevice.decode(data))
+        self.transport.write(data)
+        return
+      except Exception as e:
+        logging.error('Writing to device %s: %s', self.proxy.device.name, e)
+    self.reconnect(data)
 
   def connection_made(self, transport):
     host, port = transport.get_extra_info('peername')
-    logging.debug('Client connected from %s:%u', host, port)
-    transport.write(self.request)
+    logging.debug('Connected to proxied device %s at %s:%u', self.proxy.device.name, host, port)
+
+  def connection_lost(self, e):
+    if e is not None:
+      logging.debug('Disconnected from proxied device %s: %s', self.proxy.device.name, e)
+    else:
+      logging.debug('Disconnected from proxied device %s.', self.proxy.device.name)
+    self.transport = None
+    self.protocol = None
+    self.connected = False
+    if self.proxy.listen:
+      self.reconnect()
 
   def data_received(self, data):
-    logging.debug('Proxy response: %s', AnthemDevice.decode(data))
-    self.response = data
-    for client in self.proxy.clients:
-      client.write(data)
+    logging.debug('Message from device: %s', AnthemDevice.decode(data))
+    self.proxy.proxy_response(data)
 
+# A proxy for an AnthemDevice.
 class AnthemProxy(asyncio.Protocol):
   MODEL = 'Anthem Proxy'
 
   def __init__(self, device, host = None, port = None, forward = None):
+    self.loop = asyncio.get_running_loop()
     self.clients = set()
+    self.connection = None
     self.device = device
     self.host = host or AnthemDevice.LISTEN
     self.port = port or AnthemDevice.PORT
@@ -238,10 +269,10 @@ class AnthemProxy(asyncio.Protocol):
     return canon == self.MODEL
 
   async def run(self):
-    loop = asyncio.get_running_loop()
-    self.transport, self.protocol = await loop.create_datagram_endpoint(lambda: self, local_addr = (self.host, self.port), reuse_port = True, allow_broadcast = True)
+    self.transport, self.protocol = await self.loop.create_datagram_endpoint(lambda: self, local_addr = (self.host, self.port), reuse_port = True, allow_broadcast = True)
     try:
-      self.server = await loop.create_server(lambda: AnthemProxyConnection(self), self.host, self.port, reuse_port = True, start_serving = False)
+      self.connection = AnthemProxyConnection(self)
+      self.server = await self.loop.create_server(lambda: AnthemProxyClient(self), self.host, self.port, reuse_port = True, start_serving = False)
       while self.listen:
         await self.server.start_serving()
     finally:
@@ -257,16 +288,13 @@ class AnthemProxy(asyncio.Protocol):
     self.clients.remove(client)
 
   def connection_made(self, transport):
-    logging.info('Connected to proxied device %s.', self.device.name)
+    logging.debug('Discovery transport ready for proxy: %s', self.device.alias)
     self.discovery = transport
 
   def connection_lost(self, e):
-    if e is not None:
-      logging.debug('Disconnected from proxied device %s: %s', self.device.name, e)
-    else:
-      logging.debug('Disconnected from proxied device %s.', self.device.name)
-      # XXX: Need to reconnect
-      self.listen = False
+    logging.info('Shutting down.')
+    self.listen = False
+    self.connection.close()
 
   def on_discovery_request(self, host, port):
     addr = (host, port)
@@ -321,10 +349,13 @@ class AnthemProxy(asyncio.Protocol):
       logging.debug("Can't reply without proxy")
       return
 
-    client = AnthemProxyClient(self)
-    # XXX: put asyncio code into method?
-    asyncio.ensure_future(client.write(data))
+    self.connection.write(data)
 
+  def proxy_response(self, data):
+    for client in self.clients:
+      client.write(data)
+
+# A discovery client.
 class AnthemDiscovery(asyncio.Protocol):
   CONTINUE = True
   STOP = False
@@ -394,11 +425,15 @@ async def proxy(bind, listen, host, port, alias, name, model, serial, forward = 
   target_port = multiprocessing.Value('i', 0)
 
   target = AnthemDevice(host = host, port = port, alias = alias, name = name, model = model, serial = serial)
+  announced = False
   while not target.name or not target.usable:
     if target.valid:
       target_host.value = target.host
       target_port.value = target.port
     serialised = multiprocessing.Value(ctypes.c_wchar_p, '')
+    if not announced:
+      logging.info('Discovering target device details.')
+      announced = True
     discovery = AnthemDiscovery(host = bind, port = listen, broadcast = host, on_receive = query_device, forward = forward)
     await discovery.run()
 
