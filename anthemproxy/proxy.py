@@ -32,6 +32,7 @@ class AnthemProxy(asyncio.Protocol):
       logging.error('Creating TCP endpoint: %s', e)
       raise e
     finally:
+      self.listen = False
       if self.connection:
         self.connection.close()
       if not self.transport.is_closing():
@@ -52,6 +53,8 @@ class AnthemProxy(asyncio.Protocol):
   def connection_lost(self, e):
     logging.info('Shutting down.')
     self.listen = False
+    for client in self.clients:
+      client.close()
     self.connection.close()
 
   def on_discovery_request(self, host, port):

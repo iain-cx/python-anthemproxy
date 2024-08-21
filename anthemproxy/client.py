@@ -13,6 +13,11 @@ class AnthemProxyClient(asyncio.Protocol):
     self.port = None
     self.connected = True
 
+  def close(self):
+    if self.transport and not self.transport.is_closing():
+      logging.info('Closing connection to client: %s:%u', self.host, self.port)
+      self.transport.close()
+
   def connection_made(self, transport):
     self.transport = transport
     try:
